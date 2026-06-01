@@ -199,7 +199,7 @@ def gen_rand_data(
             if generate_data:
                 samples_from_dist = gen_func(size=size, **params_cur)
             else:
-                samples_from_dist = np.empty(size, dtype=np.float)
+                samples_from_dist = np.empty(size, dtype=float)
                 samples_from_dist[:] = np.nan
 
             samples_from_dist = pd.DataFrame(samples_from_dist)

@@ -66,7 +66,7 @@ def get_traces(model):
     nodes = list(m.stochastics)
 
     names = [node.__name__ for node in nodes]
-    dtype = [(name, np.float) for name in names]
+    dtype = [(name, float) for name in names]
     traces = np.empty(nodes[0].trace().shape[0], dtype=dtype)
 
     # Store traces in one array
