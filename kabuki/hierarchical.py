@@ -985,10 +985,11 @@ class Hierarchical(object):
     # prior
     if not self._infdata_has_group(InfData_tmp, "prior") and sample_prior:
       try:
-        prior_infdata = self._from_dict_infdata(
-            az, {"prior": self.get_prior_sample(n_prior)})
-        # InfData_tmp.update(**prior_infdata)
-        InfData_tmp = self._infdata_extend(InfData_tmp, prior_infdata, xr)
+        prior_data = self._dict_to_sample_dataset(
+            self.get_prior_sample(n_prior), xr)
+        # InfData_tmp['prior'] = prior_data
+        InfData_tmp = self._infdata_add_groups(
+            InfData_tmp, {'prior': prior_data}, xr)
       except Exception as error:
         print(f"fail to sample prior: {error}")
 
@@ -1130,6 +1131,19 @@ class Hierarchical(object):
         else:
           data[column] = data[column].astype(numpy_dtype)
     return data
+
+  def _dict_to_sample_dataset(self, data, xr):
+    """Convert sample dictionaries to xarray datasets with chain/draw dims."""
+
+    dataset = {}
+    for name, values in data.items():
+      values = np.asarray(values)
+      if values.ndim == 1:
+        values = values.reshape(1, values.shape[0])
+      dims = ("chain", "draw") + tuple(
+          f"{name}_dim_{idx}" for idx in range(values.ndim - 2))
+      dataset[name] = (dims, values)
+    return xr.Dataset(dataset)
 
   def gen_draw_index(self):
 
