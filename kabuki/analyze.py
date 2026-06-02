@@ -1005,29 +1005,84 @@ def plot_ppc_by_cond(infdata,
                      condition_vars=None,
                      num_pp_samples=500,
                      **kwargs):
-    """Extends arviz's plot_ppc function to allow plotting of ppc for different experimental conditions and subjects.
+    """Plot PPC distributions by subject and/or experimental condition.
 
     Args:
-        infdata (InferenceData from Arviz): The output from dockerHDDM sampling. 
-        subj_idx (str or list of str, optional): Defaults to None that mean plot all subjects or plot only condition level when `condition_vars` is not None. If `subj_idx` is "all", it plots all subjects vary with condition level.  
-        condition_vars (str, list of str or dict, optional): Defaults to None. `condition_vars` can be a str of variable name ('conf') or list of variable names (['conf','stim']). It support selecting condition levels of variable name, such as `{'stim':['WW','LL']}`. 
+        infdata (InferenceData from Arviz): The output from dockerHDDM sampling.
+        subj_idx (str or list of str, optional): Defaults to None that means
+            plot all subjects or plot only condition level when
+            `condition_vars` is not None. If `subj_idx` is "all", it plots all
+            subjects varying with condition level.
+        condition_vars (str, list of str or dict, optional): Defaults to None.
+            `condition_vars` can be a str of variable name ('conf') or list of
+            variable names (['conf','stim']). It supports selecting condition
+            levels of variable name, such as `{'stim':['WW','LL']}`.
         num_pp_samples (int, optional): The number of posterior predictives used for plotting. Defaults to 500.
-        **kwargs: Other arguments will be sended to `arviz.plot_ppc()`. 
+        **kwargs: Plotting options. Common options include `var_names`,
+            `random_seed`/`seed`, `alpha`, `legend`, `textsize`, `bins`,
+            `figsize`, and `max_cols`.
 
     Returns:
-        axes: The matplotlib axes. 
+        axes: The matplotlib axes.
     """
 
-    import arviz as az
+    def _as_dataset(group):
+        if hasattr(group, "to_dataset"):
+            return group.to_dataset()
+        return group
 
-    tmp_infdata = infdata.copy()
+    def _values(ds, name):
+        if name in ds:
+            return np.asarray(ds[name].values)
+        if name in ds.coords:
+            return np.asarray(ds.coords[name].values)
+        raise KeyError("Variable %s not found in observed_data." % name)
+
+    var_name = kwargs.pop("var_names", "rt")
+    if isinstance(var_name, (list, tuple)):
+        if len(var_name) != 1:
+            raise ValueError("plot_ppc_by_cond only supports one var_name.")
+        var_name = var_name[0]
+
+    seed = kwargs.pop("seed", None)
+    random_seed = kwargs.pop("random_seed", None)
+    if seed is None:
+        seed = random_seed
+    rng = np.random.default_rng(seed)
+
+    alpha = kwargs.pop("alpha", 0.35)
+    legend = kwargs.pop("legend", True)
+    textsize = kwargs.pop("textsize", None)
+    bins = kwargs.pop("bins", 30)
+    figsize = kwargs.pop("figsize", None)
+    max_cols = kwargs.pop("max_cols", 3)
+    predictive_color = kwargs.pop("predictive_color", "C0")
+    observed_color = kwargs.pop("observed_color", "black")
+
+    # Legacy az.plot_ppc options that are not needed by the direct
+    # DataTree-compatible implementation.
+    kwargs.pop("flatten", None)
+    kwargs.pop("coords", None)
+    kwargs.pop("num_pp_samples", None)
+
+    if kwargs:
+        warnings.warn(
+            "Ignoring unsupported plot_ppc_by_cond keyword arguments: %s"
+            % ", ".join(sorted(kwargs.keys()))
+        )
+
+    obs = _as_dataset(infdata.observed_data)
+    ppc = _as_dataset(infdata.posterior_predictive)
+    obs_dim = "obs_id"
+    if obs_dim not in obs.dims or obs_dim not in ppc.dims:
+        raise ValueError("observed_data and posterior_predictive must have an obs_id dimension.")
+    if var_name not in obs or var_name not in ppc:
+        raise KeyError("%s must exist in observed_data and posterior_predictive." % var_name)
+
+    mask = np.ones(obs.sizes[obs_dim], dtype=bool)
 
     if isinstance(subj_idx, list):
-        lookup = tmp_infdata.observed_data.subj_idx
-        tmp_infdata.observed_data = tmp_infdata.observed_data.where(
-            lookup.isin(subj_idx), drop=True)
-        tmp_infdata.posterior_predictive = tmp_infdata.posterior_predictive.where(
-            lookup.isin(subj_idx), drop=True)
+        mask &= np.isin(_values(obs, "subj_idx"), subj_idx)
     elif isinstance(subj_idx, str):
         if subj_idx != "all":
             raise ValueError("subj_idx must be 'all' or a list of subject indices")
@@ -1035,50 +1090,102 @@ def plot_ppc_by_cond(infdata,
         if subj_idx is not None:
             raise ValueError("subj_idx must be 'all' or a list of subject indices")
 
+    condition_var_names = None
     if condition_vars is not None:
         if isinstance(condition_vars, str) or isinstance(condition_vars, list):
-
-            condition_vars = [condition_vars] if isinstance(condition_vars, str) else condition_vars
-            tmp_df = tmp_infdata.observed_data[condition_vars].to_dataframe(
-            ).reset_index()
-
+            condition_var_names = (
+                [condition_vars]
+                if isinstance(condition_vars, str)
+                else condition_vars
+            )
         elif isinstance(condition_vars, dict):
-
-            tmp_df = tmp_infdata.observed_data[
-                condition_vars.keys()].to_dataframe().reset_index()
-
+            condition_var_names = list(condition_vars.keys())
             for key, value in condition_vars.items():
-                tmp_df = tmp_df[tmp_df[key].isin(value)]
-
-                lookup = tmp_infdata.observed_data[key]
-                tmp_infdata.observed_data = tmp_infdata.observed_data.where(
-                    lookup.isin(value), drop=True)
-                tmp_infdata.posterior_predictive = tmp_infdata.posterior_predictive.where(
-                    lookup.isin(value), drop=True)
-
-            # compatible for list
-            condition_vars = list(condition_vars.keys())
+                mask &= np.isin(_values(obs, key), value)
+        else:
+            raise ValueError("condition_vars must be a str, list, dict, or None.")
 
         if subj_idx is None:
-            total_vars = condition_vars
+            total_vars = condition_var_names
         else:
-            total_vars = ['subj_idx'] + condition_vars
+            total_vars = ["subj_idx"] + condition_var_names
     else:
-        total_vars = ['subj_idx']
-        tmp_df = tmp_infdata.observed_data[total_vars].to_dataframe().reset_index()
+        total_vars = ["subj_idx"]
 
-    format_str = '_'.join(
-        [f"{col[:4]}({{{col}}})" for col in tmp_df[total_vars].columns])
-    tmp_df['obs_id'] = tmp_df.apply(lambda row: format_str.format(**row), axis=1)
+    selected = np.flatnonzero(mask)
+    if selected.size == 0:
+        raise ValueError("No observations match the requested subject/condition selection.")
 
-    for_plot_infdata = tmp_infdata.assign_coords(obs_id=tmp_df.obs_id.values,
-                                                 groups="observed_vars")
+    label_columns = [np.asarray(_values(obs, col))[selected] for col in total_vars]
+    labels = np.asarray([
+        "_".join(
+            "%s(%s)" % (col[:4], value)
+            for col, value in zip(total_vars, row)
+        )
+        for row in zip(*label_columns)
+    ])
+    unique_labels = pd.unique(labels)
 
-    axes = az.plot_ppc(for_plot_infdata,
-                       var_names='rt',
-                       coords={'obs_id': list(tmp_df['obs_id'].unique())},
-                       flatten=[],
-                       num_pp_samples=num_pp_samples,
-                       **kwargs)
+    obs_values = np.asarray(obs[var_name].isel({obs_dim: selected}).values)
+    ppc_var = ppc[var_name].isel({obs_dim: selected})
+    ppc_values = np.asarray(ppc_var.values)
+    obs_axis = ppc_var.get_axis_num(obs_dim)
+    ppc_values = np.moveaxis(ppc_values, obs_axis, -1)
+    ppc_values = ppc_values.reshape((-1, selected.size))
 
+    if num_pp_samples is not None and num_pp_samples < ppc_values.shape[0]:
+        draw_idx = rng.choice(ppc_values.shape[0], size=num_pp_samples, replace=False)
+        ppc_values = ppc_values[draw_idx]
+
+    n_plots = len(unique_labels)
+    n_cols = min(max_cols, n_plots)
+    n_rows = int(np.ceil(float(n_plots) / n_cols))
+    if figsize is None:
+        figsize = (5 * n_cols, 3.5 * n_rows)
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
+    axes_flat = axes.ravel()
+
+    for ax, label in zip(axes_flat, unique_labels):
+        group_mask = labels == label
+        observed = np.asarray(obs_values[group_mask], dtype=float)
+        predictive = np.asarray(ppc_values[:, group_mask], dtype=float).ravel()
+        observed = observed[np.isfinite(observed)]
+        predictive = predictive[np.isfinite(predictive)]
+
+        if predictive.size:
+            ax.hist(
+                predictive,
+                bins=bins,
+                density=True,
+                alpha=alpha,
+                color=predictive_color,
+                label="posterior predictive",
+            )
+        if observed.size:
+            ax.hist(
+                observed,
+                bins=bins,
+                density=True,
+                histtype="step",
+                linewidth=2,
+                color=observed_color,
+                label="observed",
+            )
+
+        title_kwargs = {}
+        label_kwargs = {}
+        if textsize is not None:
+            title_kwargs["fontsize"] = textsize
+            label_kwargs["fontsize"] = textsize
+        ax.set_title(label, **title_kwargs)
+        ax.set_xlabel(var_name, **label_kwargs)
+        ax.set_ylabel("density", **label_kwargs)
+        if legend:
+            ax.legend(fontsize=textsize)
+
+    for ax in axes_flat[n_plots:]:
+        ax.set_visible(False)
+
+    fig.tight_layout()
     return axes
