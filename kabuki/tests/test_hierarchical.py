@@ -2,7 +2,16 @@ import os
 import kabuki
 import numpy as np
 import unittest
-from nose.tools import raises
+try:
+    from nose.tools import raises
+except Exception:
+    def raises(exception):
+        def decorator(func):
+            def wrapper(*args, **kwargs):
+                with unittest.TestCase().assertRaises(exception):
+                    func(*args, **kwargs)
+            return wrapper
+        return decorator
 import pymc as pm
 from .utils import HNodeSimple, HNodeSimpleVar, sample_from_models, create_test_models
 import pandas as pd
@@ -241,6 +250,29 @@ class TestEstimation(unittest.TestCase):
 
         # looping for each condition (i.e. twice)
         self.assertEqual(counter, subjs * 2)
+
+    def test_infdata_group_helpers(self):
+        data, _ = kabuki.generate.gen_rand_data(
+            gen_func_df,
+            {"A": {"loc": 0, "scale": 1}},
+            size=10,
+            subjs=1,
+        )
+        model = HNodeSimple(pd.DataFrame(data))
+
+        import arviz as az
+        import xarray as xr
+
+        infdata = model._empty_infdata(az, xr)
+        posterior = xr.Dataset(
+            {"mu": (("chain", "draw"), np.ones((1, 2)))},
+            coords={"chain": [0], "draw": [0, 1]},
+        )
+
+        infdata = model._infdata_add_groups(infdata, {"posterior": posterior}, xr)
+
+        self.assertTrue(model._infdata_has_group(infdata, "posterior"))
+        self.assertIn("posterior", model._infdata_group_names(infdata))
 
 
 class TestConcatenate(unittest.TestCase):

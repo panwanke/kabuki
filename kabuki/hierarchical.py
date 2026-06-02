@@ -958,10 +958,10 @@ class Hierarchical(object):
     if hasattr(self, 'infdata'):
       InfData_tmp = self.infdata
     else:
-      InfData_tmp = az.InferenceData()
-    
+      InfData_tmp = self._empty_infdata(az, xr)
+
     # Observations
-    if "observed_data" not in InfData_tmp:
+    if not self._infdata_has_group(InfData_tmp, "observed_data"):
       try:
         obs_data = self.data.copy()
         obs_data = obs_data.convert_dtypes()
@@ -972,46 +972,52 @@ class Hierarchical(object):
         obs_data['rt'] = obs_data['rt'].astype('float32')
         obs_data['response'] = obs_data['response'].astype('int')
         obs_data['subj_idx'] = obs_data['subj_idx'].astype('int')
+        obs_data = self._coerce_xarray_supported_dtypes(obs_data)
         obs_data.index.name = 'obs_id'
         xdata_observed = xr.Dataset.from_dataframe(obs_data)
         xdata_observed = xdata_observed.set_coords(["subj_idx", "trial"])
         # InfData_tmp['observed_data'] = xdata_observed
-        InfData_tmp.add_groups({'observed_data': xdata_observed})
+        InfData_tmp = self._infdata_add_groups(
+            InfData_tmp, {'observed_data': xdata_observed}, xr)
       except Exception as error:
         print(f"fail to convert observed data: {error}")
 
     # prior
-    if "prior" not in InfData_tmp and sample_prior:
+    if not self._infdata_has_group(InfData_tmp, "prior") and sample_prior:
       try:
-        prior_infdata = az.from_dict(prior=self.get_prior_sample(n_prior))
+        prior_infdata = self._from_dict_infdata(
+            az, {"prior": self.get_prior_sample(n_prior)})
         # InfData_tmp.update(**prior_infdata)
-        InfData_tmp.extend(prior_infdata)
+        InfData_tmp = self._infdata_extend(InfData_tmp, prior_infdata, xr)
       except Exception as error:
         print(f"fail to sample prior: {error}")
 
     # posteriors
-    if 'posterior' not in InfData_tmp:
+    if not self._infdata_has_group(InfData_tmp, "posterior"):
       try:
         # InfData_tmp['posterior'] = xr.Dataset.from_dataframe(self.get_posterior_trace())
-        InfData_tmp.add_groups({'posterior': self.get_posterior_trace().to_xarray()})
+        InfData_tmp = self._infdata_add_groups(
+            InfData_tmp, {'posterior': self.get_posterior_trace().to_xarray()}, xr)
       except Exception as error:
         print(f"fail to convert posterior trace: {error}")
-    
+
     # Point-wise log likelihood
-    if "log_likelihood" not in InfData_tmp and loglike:
+    if not self._infdata_has_group(InfData_tmp, "log_likelihood") and loglike:
       try:
         loglike_data = self.get_pointwise_loglike(n_loglike=n_loglike, **kwargs)
         # InfData_tmp['log_likelihood'] = loglike_data
-        InfData_tmp.add_groups({'log_likelihood': loglike_data})
+        InfData_tmp = self._infdata_add_groups(
+            InfData_tmp, {'log_likelihood': loglike_data}, xr)
       except Exception as error:
         print(f"fail to convert log-likelihood(self.lppd) to xarray: {error}")
 
     # ppc
-    if "posterior_predictive" not in InfData_tmp and ppc:
+    if not self._infdata_has_group(InfData_tmp, "posterior_predictive") and ppc:
       try:
         ppc_data = self.gen_ppc(n_ppc=n_ppc, **kwargs)
         # InfData_tmp['posterior_predictive'] = ppc_data
-        InfData_tmp.add_groups({'posterior_predictive': ppc_data})
+        InfData_tmp = self._infdata_add_groups(
+            InfData_tmp, {'posterior_predictive': ppc_data}, xr)
       except Exception as error:
         print(
             f"fail to convert posterior predictive check (self.ppc) to xarray: {error}"
@@ -1029,7 +1035,7 @@ class Hierarchical(object):
         save_name.parent.mkdir(parents=True, exist_ok=True)
       try:
           InfData_tmp.to_netcdf(save_name)
-      except OSError as error:
+      except Exception as error:
           print(f"first attempt to save {save_name} failed: {error}")
           try:
               # deleting existing file
@@ -1041,13 +1047,89 @@ class Hierarchical(object):
                       print(f"Failed to delete existing file {save_name}: {del_error}")
               # try agian
               InfData_tmp.to_netcdf(save_name)
-          except OSError as final_error:
+          except Exception as final_error:
               print(f"Failed to save {save_name} after tying to delete existing file: {final_error}")
               return InfData_tmp
 
     self.infdata = InfData_tmp
 
     return self.infdata
+
+  def _empty_infdata(self, az, xr):
+    """Return an empty ArviZ container for both old InferenceData and DataTree."""
+
+    infdata = az.InferenceData()
+    if hasattr(infdata, "add_groups"):
+      return infdata
+    if hasattr(xr, "DataTree"):
+      return xr.DataTree()
+    return infdata
+
+  def _from_dict_infdata(self, az, groups):
+    """Create InferenceData using old and new ArviZ from_dict signatures."""
+
+    try:
+      return az.from_dict(**groups)
+    except TypeError:
+      return az.from_dict(groups)
+
+  def _infdata_group_names(self, infdata):
+    groups = getattr(infdata, "groups", None)
+    if callable(groups):
+      groups = groups()
+    if groups is None:
+      return set()
+    return set(group.strip("/") for group in groups if group.strip("/"))
+
+  def _infdata_has_group(self, infdata, group):
+    if group in self._infdata_group_names(infdata):
+      return True
+    try:
+      return group in infdata
+    except TypeError:
+      return False
+
+  def _infdata_add_groups(self, infdata, groups, xr):
+    """Add groups to ArviZ InferenceData or xarray DataTree."""
+
+    if hasattr(infdata, "add_groups"):
+      infdata.add_groups(groups)
+      return infdata
+
+    if not hasattr(xr, "DataTree"):
+      raise AttributeError("ArviZ InferenceData does not support add_groups.")
+
+    tree_groups = {}
+    for group in self._infdata_group_names(infdata):
+      tree_groups[f"/{group}"] = infdata[group].to_dataset()
+    for group, dataset in groups.items():
+      tree_groups[f"/{group}"] = dataset
+    return xr.DataTree.from_dict(tree_groups)
+
+  def _infdata_extend(self, infdata, other, xr):
+    if hasattr(infdata, "extend"):
+      infdata.extend(other)
+      return infdata
+
+    groups = {
+        group: other[group].to_dataset()
+        for group in self._infdata_group_names(other)
+    }
+    return self._infdata_add_groups(infdata, groups, xr)
+
+  def _coerce_xarray_supported_dtypes(self, data):
+    """Convert pandas extension dtypes to dtypes xarray/netCDF can serialize."""
+
+    data = data.copy()
+    for column in data.columns:
+      dtype = data[column].dtype
+      if hasattr(dtype, "numpy_dtype"):
+        numpy_dtype = dtype.numpy_dtype
+        if data[column].isna().any() and numpy_dtype.kind in "iu":
+          data[column] = data[column].astype("float64")
+        else:
+          data[column] = data[column].astype(numpy_dtype)
+    return data
 
   def gen_draw_index(self):
 
